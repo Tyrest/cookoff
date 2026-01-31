@@ -96,7 +96,7 @@ class FrozenMeta(type):
     raise AttributeError(f"Cannot edit constants '{name}' in GameConstants")
 
 class GameConstants(metaclass = FrozenMeta):
-  TOTAL_TURNS = 500 #this is default without engine specification
+  TOTAL_TURNS = 10000 #this is default without engine specification
 
   MONEY_PER_TURN = 1
 
