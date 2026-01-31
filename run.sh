@@ -1,0 +1,1 @@
+python src/game.py --red bots/duo_noodle_bot.py --blue bots/basic_bot.py --map maps/generated_map.txt --replay replays/test.json

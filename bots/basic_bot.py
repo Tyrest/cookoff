@@ -1,11 +1,15 @@
 import random
+
+from queue import PriorityQueue
+from dataclasses import dataclass
 from collections import deque
 from enum import Enum
-from typing import List, Optional, Set, Tuple
+from typing import *
 
 from game_constants import FoodType, ShopCosts, Team, TileType
 from item import Food, Pan, Plate
 from robot_controller import RobotController
+from map import Map
 
 
 class States(Enum):
@@ -38,6 +42,91 @@ class States(Enum):
     PLATE_BOX_ITEM = 26
 
 
+@dataclass
+class CounterState:
+    loc: Tuple[int, int]
+    pan: Optional[Pan] = None # None if no pan
+    
+    def __init__(self, loc: Tuple[int, int], pan: Optional[Pan] = None):
+        self.loc = loc
+        self.pan = pan
+
+
+@dataclass
+class CookerState:
+    loc: Tuple[int, int]
+    pan: Optional[Pan] = None # None if no pan
+    cook_progress: int = -1 # -1 if not cooking, positive for time after cooking started
+    
+    def __init__(self, loc: Tuple[int, int], pan: Optional[Pan] = None, cook_progress: int = -1):
+        self.loc = loc
+        self.pan = pan
+        self.cook_progress = cook_progress
+        
+
+@dataclass
+class BoxState:
+    loc: Tuple[int, int]
+    item: Food = None # None if not occupied
+    count: int = 0
+    
+    def __init__(self, loc: Tuple[int, int], item: Food = None):
+        self.loc = loc
+        self.item = item
+        
+
+@dataclass
+class OrderState:
+    order_id: int
+    required: List[FoodType]
+    created_turn: int
+    expires_turn: int
+    reward: int
+    penalty: int
+    claimed_by: Optional[int] = None
+    completed_turn: Optional[int] = None
+    is_active: bool = True
+    
+    def __init__(self, order: Dict[str, Any]):
+        self.order_id = order["order_id"]
+        self.required = order["required"]
+        self.created_turn = order["created_turn"]
+        self.expires_turn = order["expires_turn"]
+        self.reward = order["reward"]
+        self.penalty = order["penalty"]
+        self.claimed_by = order["claimed_by"]
+        self.completed_turn = order["completed_turn"]
+        self.is_active = order["is_active"]
+
+
+class Observation:
+    counters: List[CounterState] = []
+    cookers: List[CookerState] = []
+    boxes: List[BoxState] = []
+    orders: PriorityQueue[Tuple[int, OrderState]] = PriorityQueue()
+    
+    def _init_from_map(self, m: Map):
+        
+        for x in range(m.width):
+            for y in range(m.height):
+                tile = m.tiles[x][y]
+                if tile.tile_name == TileType.COUNTER.tile_name:
+                    self.counters.append(CounterState(loc=(x, y)))
+                elif tile.tile_name == TileType.COOKER.tile_name:
+                    self.cookers.append(CookerState(loc=(x, y)))
+                elif tile.tile_name == TileType.BOX.tile_name:
+                    self.boxes.append(BoxState(loc=(x, y)))
+
+    def _init_orders(self, orders: List[Dict]):
+        for order in orders:
+            priority = order["expires_turn"] / (order["reward"] + order["penalty"]) # higher priority for earlier orders with higher reward and penalty
+            self.orders.put((priority, OrderState(order)))
+
+    def __init__(self, m: Map, orders: List[Dict]) -> None:
+        self._init_from_map(m)
+        self._init_orders(orders)
+        
+
 class BotPlayer:
     def __init__(self, map_copy):
         self.map = map_copy
@@ -51,6 +140,8 @@ class BotPlayer:
         self.cooker_timer = None
 
         self.state = States.INIT
+        
+        self.obs = None # Init in play_turn
 
     def get_bfs_path(
         self, controller: RobotController, start: Tuple[int, int], target_predicate
@@ -116,20 +207,12 @@ class BotPlayer:
     def next_order(self, controller: RobotController) -> Optional[dict]:
         self.current_order = None
 
-    def play_turn(self, controller: RobotController):
-        orders = controller.get_orders(controller.get_team())
+    def play_turn(self, controller: RobotController):        
+        if self.obs is None:
+            self.obs = Observation(controller.get_map(controller.get_team()), controller.get_orders(controller.get_team()))
 
-        if not self.current_order:
-            for order in orders:
-                if (
-                    order["order_id"] not in self.fulfilled_orders
-                    and FoodType.EGG.food_name not in order["required"]
-                ):
-                    self.current_order = order
-                    print(f"Current order: {self.current_order}")
-                    break
-            else:
-                return  # No available orders
+        if self.current_order is None:
+            _, self.current_order = self.obs.orders.get()
 
         my_bots = controller.get_team_bot_ids(controller.get_team())
         if not my_bots:
@@ -171,6 +254,12 @@ class BotPlayer:
 
         if not self.current_order:
             return
+        
+        if self.current_order.expires_turn < controller.get_turn():
+            # Get next order
+            self.state = States.INIT
+            self.current_order = None
+            return 
 
         if self.state in [
             States.BUY_MEAT,
@@ -182,16 +271,16 @@ class BotPlayer:
         if self.state is States.INIT:
             tile = controller.get_tile(controller.get_team(), kx, ky)
             if (
-                FoodType.MEAT.food_name not in self.current_order["required"]
-                and FoodType.EGG.food_name not in self.current_order["required"]
+                FoodType.MEAT.food_name not in self.current_order.required
+                and FoodType.EGG.food_name not in self.current_order.required
             ) or (tile and isinstance(tile.item, Pan)):
-                if FoodType.MEAT.food_name in self.current_order["required"]:
+                if FoodType.MEAT.food_name in self.current_order.required:
                     print("Going to buy meat")
                     self.state = States.BUY_MEAT
-                elif FoodType.EGG.food_name in self.current_order["required"]:
+                elif FoodType.EGG.food_name in self.current_order.required:
                     print("Going to buy egg")
                     self.state = States.BUY_EGG
-                elif FoodType.ONIONS.food_name in self.current_order["required"]:
+                elif FoodType.ONIONS.food_name in self.current_order.required:
                     print("Going to buy onions")
                     self.state = States.BUY_ONIONS
                 else:
@@ -248,7 +337,7 @@ class BotPlayer:
             if self.move_towards(controller, bot_id, kx, ky):
                 # Using the NEW logic where place() starts cooking automatically
                 if controller.place(bot_id, kx, ky):
-                    if FoodType.ONIONS.food_name in self.current_order["required"]:
+                    if FoodType.ONIONS.food_name in self.current_order.required:
                         print("Going to buy onions")
                         self.state = States.BUY_ONIONS
                     else:
@@ -300,9 +389,9 @@ class BotPlayer:
         elif self.state == States.PUT_PLATE_ON_COUNTER:
             if self.move_towards(controller, bot_id, cx, cy):
                 if controller.place(bot_id, cx, cy):
-                    if FoodType.NOODLES.food_name in self.current_order["required"]:
+                    if FoodType.NOODLES.food_name in self.current_order.required:
                         self.state = States.BUY_NOODLES
-                    elif FoodType.SAUCE.food_name in self.current_order["required"]:
+                    elif FoodType.SAUCE.food_name in self.current_order.required:
                         self.state = States.BUY_SAUCE
                     else:
                         self.state = States.PICKUP_PLATE
@@ -322,11 +411,11 @@ class BotPlayer:
         elif self.state == States.ADD_NOODLES_TO_PLATE:
             if self.move_towards(controller, bot_id, cx, cy):
                 if controller.add_food_to_plate(bot_id, cx, cy):
-                    if FoodType.MEAT.food_name in self.current_order["required"]:
+                    if FoodType.MEAT.food_name in self.current_order.required:
                         self.state = States.WAIT_FOR_MEAT
-                    elif FoodType.SAUCE.food_name in self.current_order["required"]:
+                    elif FoodType.SAUCE.food_name in self.current_order.required:
                         self.state = States.BUY_SAUCE
-                    elif FoodType.ONIONS.food_name in self.current_order["required"]:
+                    elif FoodType.ONIONS.food_name in self.current_order.required:
                         self.state = States.RETRIEVE_BOX_ITEM
                     else:
                         self.state = States.PICKUP_PLATE
@@ -345,7 +434,7 @@ class BotPlayer:
         elif self.state == States.ADD_SAUCE_TO_PLATE:
             if self.move_towards(controller, bot_id, cx, cy):
                 if controller.add_food_to_plate(bot_id, cx, cy):
-                    if FoodType.ONIONS.food_name in self.current_order["required"]:
+                    if FoodType.ONIONS.food_name in self.current_order.required:
                         self.state = States.RETRIEVE_BOX_ITEM
                     else:
                         self.state = States.PICKUP_PLATE
@@ -374,9 +463,9 @@ class BotPlayer:
         elif self.state == States.ADD_MEAT_TO_PLATE:
             if self.move_towards(controller, bot_id, cx, cy):
                 if controller.add_food_to_plate(bot_id, cx, cy):
-                    if FoodType.SAUCE.food_name in self.current_order["required"]:
+                    if FoodType.SAUCE.food_name in self.current_order.required:
                         self.state = States.BUY_SAUCE
-                    elif FoodType.ONIONS.food_name in self.current_order["required"]:
+                    elif FoodType.ONIONS.food_name in self.current_order.required:
                         self.state = States.RETRIEVE_BOX_ITEM
                     else:
                         self.state = States.PICKUP_PLATE
@@ -403,7 +492,7 @@ class BotPlayer:
             if self.move_towards(controller, bot_id, ux, uy):
                 if controller.submit(bot_id, ux, uy):
                     self.state = States.INIT
-                    self.fulfilled_orders.add(self.current_order["order_id"])
+                    self.fulfilled_orders.add(self.current_order.order_id)
                     self.current_order = None
 
         # state 16: trash
