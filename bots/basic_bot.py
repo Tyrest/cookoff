@@ -435,17 +435,43 @@ class BotPlayer:
                 total_cost += FoodType.SAUCE.buy_cost
         return total_cost
 
+    def estimate_time(self, ingredient_list: List[str]) -> int:
+        total_cost = 0
+        for ingredient in ingredient_list:
+            if ingredient == FoodType.MEAT.food_name:
+                total_cost += 50
+            elif ingredient == FoodType.EGG.food_name:
+                total_cost += 40
+            elif ingredient == FoodType.ONIONS.food_name:
+                total_cost += 25
+            elif ingredient == FoodType.NOODLES.food_name:
+                total_cost += 20
+            elif ingredient == FoodType.SAUCE.food_name:
+                total_cost += 20
+        return total_cost
+
     def select_next_order(self, controller: RobotController, worker: BotWorkerState):
         """Select next order for a specific bot worker."""
         orders = controller.get_orders(controller.get_team())
         best_order = None
         best_value = -float("inf")
         team_money = controller.get_team_money(controller.get_team())
+        
+        # Reserve money for already claimed orders
+        reserved_money = 0
+        for ws in self.worker_states.values():
+            if ws.current_order and ws.bot_id != worker.bot_id:
+                reserved_money += self.calculate_ingredient_cost(ws.current_order["required"])
+        available_money = team_money - reserved_money * 0.5
 
         for order in orders:
             order_id = order["order_id"]
             # Skip if already fulfilled or claimed by another bot
             if order_id in self.fulfilled_orders or order_id in self.claimed_orders:
+                continue
+            # Skip orders with duplicate ingredients
+            required = order["required"]
+            if len(required) != len(set(required)):
                 continue
             time_remaining = order["expires_turn"] - controller.get_turn()
             if time_remaining <= 0:
@@ -457,7 +483,13 @@ class BotPlayer:
             if value <= 0:
                 continue
             value = value / time_remaining
-            if value > best_value and team_money >= ingredient_cost:
+            # Slightly penalize orders with meat or eggs (harder due to cooking)
+            required = order["required"]
+            if FoodType.MEAT.food_name in required:
+                value *= 0.80  # 20% penalty for cooking-required orders
+            if FoodType.EGG.food_name in required:
+                value *= 0.80  # 20% penalty for egg orders
+            if value > best_value and available_money >= ingredient_cost:
                 best_value = value
                 best_order = order
 
