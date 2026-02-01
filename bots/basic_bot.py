@@ -638,9 +638,6 @@ class BotPlayer:
                     self.snapshot = copy.deepcopy(self.worker_states)
                     self.run_sabotage(controller)
                     return
-            
-        # TODO: Implement recovering from sabotage state
-        # ...
 
         # Run each bot independently
         for i, bot_id in enumerate(my_bots):
@@ -1154,12 +1151,20 @@ class BotPlayer:
             return
         bot0_x, bot0_y = bot0_state["x"], bot0_state["y"]
         
+        enemy_bots = controller.get_team_bot_ids(controller.get_enemy_team())
+        enemy_pos = [(controller.get_bot_state(bot_id)["x"], controller.get_bot_state(bot_id)["y"]) for bot_id in enemy_bots]
+        
+        my_pos = [(controller.get_bot_state(bot_id)["x"], controller.get_bot_state(bot_id)["y"]) for bot_id in my_bots]
+        my_pos.remove((bot0_x, bot0_y))
+        
+        other_bot_positions = set(enemy_pos + my_pos)
+        
         if self.sabotage_state == SabotageState.MOVE_TO_PAN:
             for mx in range(m.width):
                 for my in range(m.height):
                     if isinstance(m.tiles[mx][my].item, Pan):
                         # Pick up the pan
-                        if self.move_towards(controller, bot0_id, mx, my):
+                        if self.move_towards(controller, bot0_id, mx, my, other_bot_positions):
                             if controller.pickup(bot0_id, mx, my):
                                 self.sabotage_state = SabotageState.MOVE_TO_TRASH
                                 return 
@@ -1167,7 +1172,7 @@ class BotPlayer:
         elif self.sabotage_state == SabotageState.MOVE_TO_TRASH:
             trash = self.find_nearest_tile(controller, bot0_x, bot0_y, "TRASH")
             if trash:
-                if self.move_towards(controller, bot0_id, trash[0], trash[1]):
+                if self.move_towards(controller, bot0_id, trash[0], trash[1], other_bot_positions):
                     if controller.trash(bot0_id, trash[0], trash[1]):
                         if DEBUG:
                             print(f"Bot 0 threw away food in pan at turn {controller.get_turn()}")
@@ -1177,7 +1182,7 @@ class BotPlayer:
         elif self.sabotage_state == SabotageState.PLACE_PAN_ON_COUNTER:
             counter = self.find_nearest_tile(controller, bot0_x, bot0_y, "COUNTER")
             if counter:
-                if self.move_towards(controller, bot0_id, counter[0], counter[1]):
+                if self.move_towards(controller, bot0_id, counter[0], counter[1], other_bot_positions):
                     if controller.place(bot0_id, counter[0], counter[1]):
                         if DEBUG:
                             print(f"Bot 0 placed pan on counter at turn {controller.get_turn()}")
@@ -1189,7 +1194,7 @@ class BotPlayer:
                 for my in range(m.height):
                     if isinstance(m.tiles[mx][my].item, Plate):
                         # Pick up the plate
-                        if self.move_towards(controller, bot0_id, mx, my):
+                        if self.move_towards(controller, bot0_id, mx, my, other_bot_positions):
                             if controller.pickup(bot0_id, mx, my):
                                 self.sabotage_state = SabotageState.MOVE_TO_TRASH
                                 return
@@ -1197,7 +1202,7 @@ class BotPlayer:
         elif self.sabotage_state == SabotageState.MOVE_TO_TRASH:
             trash = self.find_nearest_tile(controller, bot0_x, bot0_y, "TRASH")
             if trash:
-                if self.move_towards(controller, bot0_id, trash[0], trash[1]):
+                if self.move_towards(controller, bot0_id, trash[0], trash[1], other_bot_positions):
                     if controller.trash(bot0_id, trash[0], trash[1]):
                         if DEBUG:
                             print(f"Bot 0 threw away plate at turn {controller.get_turn()}")
