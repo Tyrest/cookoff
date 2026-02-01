@@ -12,6 +12,8 @@ from item import Food, Pan, Plate
 from robot_controller import RobotController
 from time import time
 
+DEBUG = False
+
 
 class States(Enum):
     INIT = auto()
@@ -60,8 +62,8 @@ class BotWorkerState:
     def __init__(self, bot_id: int):
         self.bot_id = bot_id
         self.state = States.INIT
-        self.last_state = None
-        self.current_order = None
+        self.last_state: Optional[States] = None
+        self.current_order: Optional[dict] = None
         self.counter_loc: Optional[Tuple[int, int]] = None
         self.cooker_loc: Optional[Tuple[int, int]] = None
         self.box_loc: Optional[Tuple[int, int]] = None
@@ -76,32 +78,37 @@ class BotPlayer:
         self.fulfilled_orders: set[int] = set()
         self.claimed_orders: set[int] = set()  # Orders claimed by any bot
         self.worker_states: dict[int, BotWorkerState] = {}  # Per-bot state
-        # Area detection state
-        self._areas_checked = False
-        self._bots_share_area = True  # Assume shared until proven otherwise
-        self._delegate_bot = None  # Will hold teamwork_bot instance if needed
         
         # Sabotage state
         self.sabotage = False
         self.snapshot = None
         self.sabotage_state = None
+        # Capability flags (set after first turn analysis)
+        self._capabilities_analyzed = False
+        self._has_cooker = True
+        self._has_storage = True  # Have 2+ counters or 1 counter + box
+        self._can_do_onions = True  # Need storage for onions
+
+        # Set random seed for reproducibility
+        random.seed(42)
 
     def _flood_fill(self, start_x: int, start_y: int) -> Set[Tuple[int, int]]:
-        """Flood fill to find all walkable tiles reachable from a starting position."""
+        """Flood fill to find all reachable tiles from a starting position."""
         reachable = set()
         queue = deque([(start_x, start_y)])
         w, h = self.map.width, self.map.height
-        
+
         while queue:
             x, y = queue.popleft()
             if (x, y) in reachable:
                 continue
             if not (0 <= x < w and 0 <= y < h):
                 continue
+            # Include the tile itself (even if not walkable) to check adjacent tiles
+            reachable.add((x, y))
+            # Only expand through walkable tiles
             if not self.map.is_tile_walkable(x, y):
                 continue
-            reachable.add((x, y))
-            # Check all 8 directions
             for dx in [-1, 0, 1]:
                 for dy in [-1, 0, 1]:
                     if dx == 0 and dy == 0:
@@ -109,33 +116,60 @@ class BotPlayer:
                     queue.append((x + dx, y + dy))
         return reachable
 
-    def _check_bot_areas(self, controller: RobotController) -> bool:
-        """Check if all bots share the same walkable area.
-        Returns True if bots are in the same area, False if separated.
-        """
+    def _analyze_capabilities(self, controller: RobotController) -> None:
+        """Analyze what tiles are reachable and set capability flags."""
+        if self._capabilities_analyzed:
+            return
+        self._capabilities_analyzed = True
+
         my_bots = controller.get_team_bot_ids(controller.get_team())
-        if len(my_bots) <= 1:
-            return True  # Single bot, no separation possible
-        
-        # Get flood fill from first bot
-        first_bot = my_bots[0]
-        first_state = controller.get_bot_state(first_bot)
+        if not my_bots:
+            return
+
+        # Get reachable tiles from first bot
+        first_state = controller.get_bot_state(my_bots[0])
         if not first_state:
-            return True
-        first_area = self._flood_fill(first_state["x"], first_state["y"])
-        
-        # Check if all other bots are in the same area
-        for bot_id in my_bots[1:]:
-            bot_state = controller.get_bot_state(bot_id)
-            if not bot_state:
-                continue
-            bot_pos = (bot_state["x"], bot_state["y"])
-            if bot_pos not in first_area:
-                print(f"Bots are in separate areas! Bot {first_bot} and Bot {bot_id} cannot reach each other.")
-                return False
-        
-        print("All bots share the same walkable area.")
-        return True
+            return
+        reachable = self._flood_fill(first_state["x"], first_state["y"])
+
+        # Count accessible tile types
+        counters = 0
+        cookers = 0
+        boxes = 0
+        has_shop = False
+        has_submit = False
+
+        for x, y in reachable:
+            if 0 <= x < self.map.width and 0 <= y < self.map.height:
+                tile = self.map.tiles[x][y]
+                if tile.tile_name == "COUNTER":
+                    counters += 1
+                elif tile.tile_name == "COOKER":
+                    cookers += 1
+                elif tile.tile_name == "BOX":
+                    boxes += 1
+                elif tile.tile_name == "SHOP":
+                    has_shop = True
+                elif tile.tile_name == "SUBMIT":
+                    has_submit = True
+
+        if DEBUG:
+            print(
+                f"Accessible tiles: {counters} counters, {cookers} cookers, {boxes} boxes, shop={has_shop}, submit={has_submit}"
+            )
+
+        # Set capability flags
+        self._has_cooker = cookers > 0
+        # Need 2 counters OR 1 counter + 1 box for storage (one for plate, one for onions)
+        self._has_storage = (counters >= 2) or (counters >= 1 and boxes >= 1)
+        # Can do onions if we have storage capability
+        self._can_do_onions = self._has_storage
+
+        if DEBUG:
+            if not self._has_cooker:
+                print("No cooker accessible - will skip orders requiring meat/egg")
+            if not self._has_storage:
+                print("Limited storage - will skip orders requiring onions")
 
     def get_proximity_cost(
         self, pos: Tuple[int, int], other_bots: Set[Tuple[int, int]]
@@ -218,6 +252,8 @@ class BotPlayer:
     ) -> bool:
         """Move in a random valid direction to get unstuck."""
         bot_state = controller.get_bot_state(bot_id)
+        if bot_state is None:
+            return False
         bx, by = bot_state["x"], bot_state["y"]
 
         possible = []
@@ -262,6 +298,8 @@ class BotPlayer:
         other_bot_positions: Optional[Set[Tuple[int, int]]] = None,
     ) -> bool:
         bot_state = controller.get_bot_state(bot_id)
+        if bot_state is None:
+            return False
         bx, by = bot_state["x"], bot_state["y"]
         other_bot_positions = other_bot_positions or set()
 
@@ -470,12 +508,14 @@ class BotPlayer:
         best_order = None
         best_value = -float("inf")
         team_money = controller.get_team_money(controller.get_team())
-        
+
         # Reserve money for already claimed orders
         reserved_money = 0
         for ws in self.worker_states.values():
             if ws.current_order and ws.bot_id != worker.bot_id:
-                reserved_money += self.calculate_ingredient_cost(ws.current_order["required"])
+                reserved_money += self.calculate_ingredient_cost(
+                    ws.current_order["required"]
+                )
         available_money = team_money - reserved_money * 0.5
 
         for order in orders:
@@ -487,6 +527,16 @@ class BotPlayer:
             required = order["required"]
             if len(required) != len(set(required)):
                 continue
+            # Skip orders we can't fulfill due to missing tiles
+            if not self._has_cooker:
+                if (
+                    FoodType.MEAT.food_name in required
+                    or FoodType.EGG.food_name in required
+                ):
+                    continue
+            if not self._can_do_onions:
+                if FoodType.ONIONS.food_name in required:
+                    continue
             time_remaining = order["expires_turn"] - controller.get_turn()
             if time_remaining <= 0:
                 continue
@@ -510,31 +560,16 @@ class BotPlayer:
         if best_order:
             worker.current_order = best_order
             self.claimed_orders.add(best_order["order_id"])
-            print(f"Bot {worker.bot_id} selected order: {best_order}")
+            if DEBUG:
+                print(f"Bot {worker.bot_id} selected order: {best_order}")
 
     def play_turn(self, controller: RobotController):
         my_bots = controller.get_team_bot_ids(controller.get_team())
         if not my_bots:
             return
 
-        # Check bot areas on first turn
-        if not self._areas_checked:
-            self._areas_checked = True
-            self._bots_share_area = self._check_bot_areas(controller)
-            if not self._bots_share_area:
-                # Bots are in separate areas, delegate to teamwork_bot
-                try:
-                    from teamwork_bot import BotPlayer as TeamworkBotPlayer
-                    self._delegate_bot = TeamworkBotPlayer(self.map)
-                    print("Delegating to teamwork_bot for separate area coordination.")
-                except ImportError:
-                    print("WARNING: teamwork_bot not found, falling back to basic_bot logic.")
-                    self._bots_share_area = True  # Fall back to current logic
-
-        # Delegate to teamwork_bot if bots are in separate areas
-        if not self._bots_share_area and self._delegate_bot is not None:
-            self._delegate_bot.play_turn(controller)
-            return
+        # Analyze capabilities on first turn
+        self._analyze_capabilities(controller)
 
         # Initialize worker states for each bot
         for bot_id in my_bots:
@@ -651,9 +686,10 @@ class BotPlayer:
     ) -> None:
         """Run the state machine for a single bot worker."""
         if worker.last_state != worker.state:
-            print(
-                f"t={controller.get_turn()} Bot {worker.bot_id} state: {worker.state}"
-            )
+            if DEBUG:
+                print(
+                    f"t={controller.get_turn()} Bot {worker.bot_id} state: {worker.state}"
+                )
             worker.last_state = worker.state
 
         bot_id = worker.bot_id
@@ -678,9 +714,10 @@ class BotPlayer:
             num_stuck = self.count_stuck_workers()
 
             if is_blocking or num_stuck >= 2:
-                print(
-                    f"Bot {bot_id} is stuck (blocking={is_blocking}, num_stuck={num_stuck}), moving randomly"
-                )
+                if DEBUG:
+                    print(
+                        f"Bot {bot_id} is stuck (blocking={is_blocking}, num_stuck={num_stuck}), moving randomly"
+                    )
                 if self.move_randomly(controller, bot_id, other_bot_positions):
                     worker.stuck_turns = 0
                     return
@@ -690,8 +727,17 @@ class BotPlayer:
         # First find shop to use as reference for cooker distance constraint
         shop_pos = self.find_nearest_tile(controller, bx, by, "SHOP")
 
+        # Determine what this order needs
+        if worker.current_order is None:
+            return
+        needs_cooker = (
+            FoodType.MEAT.food_name in worker.current_order["required"]
+            or FoodType.EGG.food_name in worker.current_order["required"]
+        )
+        needs_storage = FoodType.ONIONS.food_name in worker.current_order["required"]
+
         if worker.counter_loc is None:
-            # Only consider counters within 19 moves of the shop
+            # Only consider counters within 16 moves of the shop
             worker.counter_loc = self.find_nearest_tile_of_types(
                 controller,
                 bx,
@@ -701,7 +747,10 @@ class BotPlayer:
                 avoid_positions=other_bot_positions,
                 max_distance_from=(shop_pos, 16) if shop_pos else None,
             )
-        if worker.cooker_loc is None:
+        if worker.counter_loc is None:
+            return
+
+        if needs_cooker and worker.cooker_loc is None:
             # Only consider cookers within 19 moves of the shop
             worker.cooker_loc = self.find_nearest_tile_of_types(
                 controller,
@@ -712,10 +761,13 @@ class BotPlayer:
                 avoid_positions=other_bot_positions,
                 max_distance_from=(shop_pos, 19) if shop_pos else None,
             )
-        if worker.counter_loc is None or worker.cooker_loc is None:
-            return
-        if worker.box_loc is None:
-            all_exclude = exclude_boxes + [worker.counter_loc, worker.cooker_loc]
+            if worker.cooker_loc is None:
+                return
+
+        if needs_storage and worker.box_loc is None:
+            all_exclude = exclude_boxes + [worker.counter_loc]
+            if worker.cooker_loc:
+                all_exclude.append(worker.cooker_loc)
             worker.box_loc = self.find_nearest_tile_of_types(
                 controller,
                 bx,
@@ -724,14 +776,12 @@ class BotPlayer:
                 exclude=all_exclude,
                 avoid_positions=other_bot_positions,
             )
-        # print(f"Bot {bot_id} counter at {worker.counter_loc}, cooker at {worker.cooker_loc}, box at {worker.box_loc}")
-
-        if worker.box_loc is None:
-            return
+            if worker.box_loc is None:
+                return
 
         cx, cy = worker.counter_loc
-        kx, ky = worker.cooker_loc
-        box_x, box_y = worker.box_loc
+        kx, ky = worker.cooker_loc if worker.cooker_loc else (0, 0)
+        box_x, box_y = worker.box_loc if worker.box_loc else (0, 0)
 
         if not worker.current_order:
             return
