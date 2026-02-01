@@ -1,6 +1,8 @@
 import heapq
 import itertools
 import random
+import copy
+
 from collections import deque, Counter
 from enum import Enum, auto
 from typing import Dict, List, Optional, Set, Tuple
@@ -82,6 +84,13 @@ class States(Enum):
     PLATE_BOX_ITEM = auto()
 
 
+class SabotageState(Enum):
+    MOVE_TO_PAN = auto()
+    MOVE_TO_TRASH = auto()
+    PLACE_PAN_ON_COUNTER = auto()
+    MOVE_TO_PLATE = auto()
+
+
 class BotWorkerState:
     """Per-bot state for independent order processing."""
 
@@ -105,6 +114,12 @@ class BotPlayer:
         self.fulfilled_orders: set[int] = set()
         self.claimed_orders: set[int] = set()  # Orders claimed by any bot
         self.worker_states: dict[int, BotWorkerState] = {}  # Per-bot state
+        
+        # Sabotage state
+        self.sabotage = False
+        self.snapshot = None
+        self.sabotage_state = None
+        
         # Capability flags (set after first turn analysis)
         self._capabilities_analyzed = False
         self._has_cooker = True
