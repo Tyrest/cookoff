@@ -1,6 +1,8 @@
 import heapq
 import itertools
 import random
+
+from queue import PriorityQueue
 from collections import deque
 from enum import Enum, auto
 from typing import Dict, List, Optional, Set, Tuple
@@ -71,6 +73,11 @@ class BotPlayer:
         self._areas_checked = False
         self._bots_share_area = True  # Assume shared until proven otherwise
         self._delegate_bot = None  # Will hold teamwork_bot instance if needed
+        
+        # Global state
+        self.state = States.INIT
+        self.current_order = None
+        self.mutual_counter = None
 
     def _flood_fill(self, start_x: int, start_y: int) -> Set[Tuple[int, int]]:
         """Flood fill to find all walkable tiles reachable from a starting position."""
@@ -420,6 +427,51 @@ class BotPlayer:
         # Sort by effective distance (ascending), then by walkable neighbors (descending) for ties
         candidates.sort(key=lambda c: (c[1], -count_walkable_neighbors(c[0])))
         return candidates[0][0]
+    
+    def find_best_mutual_counter(self, controller: RobotController) -> Optional[Tuple[int, int]]:
+        """Find the nearest counter that's available to both the shop and cooker workers."""
+        bot1_x, bot1_y = controller.get_bot_state(0)["x"], controller.get_bot_state(0)["y"]
+        bot2_x, bot2_y = controller.get_bot_state(1)["x"], controller.get_bot_state(1)["y"]
+        
+        # Flood fill to find all walkable tiles reachable by each bot
+        bot1_reachable = self._flood_fill(bot1_x, bot1_y)
+        bot2_reachable = self._flood_fill(bot2_x, bot2_y)
+        
+        # Find all counters that are adjacent to walkable tiles reachable by BOTH bots
+        w, h = self.map.width, self.map.height
+        mutual_counters = PriorityQueue()
+        
+        for x in range(w):
+            for y in range(h):
+                tile = self.map.tiles[x][y]
+                if tile.tile_name == "COUNTER":
+                    # Check if this counter is adjacent to tiles reachable by both bots
+                    bot1_can_reach = False
+                    bot2_can_reach = False
+                    
+                    for dx in [-1, 0, 1]:
+                        for dy in [-1, 0, 1]:
+                            if dx == 0 and dy == 0:
+                                continue
+                            nx, ny = x + dx, y + dy
+                            if 0 <= nx < w and 0 <= ny < h:
+                                if (nx, ny) in bot1_reachable:
+                                    bot1_can_reach = True
+                                if (nx, ny) in bot2_reachable:
+                                    bot2_can_reach = True
+                    
+                    if bot1_can_reach and bot2_can_reach:
+                        # Calculate BFS distance from each bot to this counter
+                        dist1 = self._bfs_distance(bot1_x, bot1_y, x, y)
+                        dist2 = self._bfs_distance(bot2_x, bot2_y, x, y)
+                        if dist1 is not None and dist2 is not None:
+                            mutual_counters.put((dist1 + dist2, (x, y)))
+        
+        if not mutual_counters:
+            return None
+        
+        # Return the counter with the minimum combined distance
+        return mutual_counters.get()[1]
 
     def calculate_ingredient_cost(self, ingredient_list: List[str]) -> int:
         total_cost = 0
@@ -473,526 +525,105 @@ class BotPlayer:
         if not my_bots:
             return
 
-        # Check bot areas on first turn
-        if not self._areas_checked:
-            self._areas_checked = True
-            self._bots_share_area = self._check_bot_areas(controller)
-            if not self._bots_share_area:
-                # Bots are in separate areas, delegate to teamwork_bot
-                try:
-                    from teamwork_bot import BotPlayer as TeamworkBotPlayer
-
-                    self._delegate_bot = TeamworkBotPlayer(self.map)
-                    print("Delegating to teamwork_bot for separate area coordination.")
-                except ImportError:
-                    print(
-                        "WARNING: teamwork_bot not found, falling back to basic_bot logic."
-                    )
-                    self._bots_share_area = True  # Fall back to current logic
-
-        # Delegate to teamwork_bot if bots are in separate areas
-        if not self._bots_share_area and self._delegate_bot is not None:
-            self._delegate_bot.play_turn(controller)
-            return
-
         # Initialize worker states for each bot
         for bot_id in my_bots:
             if bot_id not in self.worker_states:
                 self.worker_states[bot_id] = BotWorkerState(bot_id)
-
-        # Get all other bots' locations to use as exclusions
-        all_counters = []
-        all_cookers = []
-        all_boxes = []
-        for worker in self.worker_states.values():
-            if worker.counter_loc:
-                all_counters.append(worker.counter_loc)
-            if worker.cooker_loc:
-                all_cookers.append(worker.cooker_loc)
-            if worker.box_loc:
-                all_boxes.append(worker.box_loc)
-
-        # Run each bot independently
-        for i, bot_id in enumerate(my_bots):
-            worker = self.worker_states[bot_id]
-
-            # Select order if none
-            if worker.current_order is None:
-                self.select_next_order(controller, worker)
-                if worker.current_order is None:
-                    continue
-
-            # Get exclusions (tiles claimed by other bots)
-            other_counters = [
-                ws.counter_loc
-                for ws in self.worker_states.values()
-                if ws.bot_id != bot_id and ws.counter_loc
-            ]
-            other_cookers = [
-                ws.cooker_loc
-                for ws in self.worker_states.values()
-                if ws.bot_id != bot_id and ws.cooker_loc
-            ]
-            other_boxes = [
-                ws.box_loc
-                for ws in self.worker_states.values()
-                if ws.bot_id != bot_id and ws.box_loc
-            ] + other_counters
-
-            # Get other bot positions for proximity-aware pathfinding
-            other_bot_positions = self.get_other_bot_positions(controller, bot_id)
-
-            self.run_worker(
-                controller,
-                worker,
-                other_counters,
-                other_cookers,
-                other_boxes,
-                other_bot_positions,
-            )
+                
+                # Initialize available tiles
+                self.worker_states[bot_id].counter_loc = self.find_nearest_tile(controller, bot_id, "COUNTER", exclude=[controller.get_bot_state(not bot_id)["x"], controller.get_bot_state(not bot_id)["y"]])
+                self.worker_states[bot_id].cooker_loc = self.find_nearest_tile(controller, bot_id, "COOKER", exclude=[controller.get_bot_state(not bot_id)["x"], controller.get_bot_state(not bot_id)["y"]])
+                self.worker_states[bot_id].box_loc = self.find_nearest_tile(controller, bot_id, "BOX", exclude=[controller.get_bot_state(not bot_id)["x"], controller.get_bot_state(not bot_id)["y"]])
+                
+                # Delegate roles to each bots based on available tiles
+                if self.worker_states[bot_id].cooker_loc is not None:
+                    self.worker_states["cooker"] = bot_id
+                if self.worker_states[bot_id].counter_loc is not None:
+                    self.worker_states["counter"] = bot_id
+                if self.worker_states[bot_id].box_loc is not None:
+                    self.worker_states["box"] = bot_id
+                    
+                if self.find_nearest_tile(controller, bot_id, "SHOP") is not None:
+                    self.worker_states["shop"] = bot_id
+                if self.find_nearest_tile(controller, bot_id, "SUBMIT") is not None:
+                    self.worker_states["submit"] = bot_id
+                if self.find_nearest_tile(controller, bot_id, "TRASH") is not None:
+                    self.worker_states["trash"] = bot_id
+        
+        # Select next order for each bot
+        if self.current_order is None:
+            self.select_next_order(controller)
+            
+        # Run the state machine
+        self.run_worker(controller)
 
     def run_worker(
         self,
         controller: RobotController,
-        worker: BotWorkerState,
-        exclude_counters: List[Tuple[int, int]],
-        exclude_cookers: List[Tuple[int, int]],
-        exclude_boxes: List[Tuple[int, int]],
-        other_bot_positions: Set[Tuple[int, int]],
+        # worker: BotWorkerState,
+        # exclude_counters: List[Tuple[int, int]],
+        # exclude_cookers: List[Tuple[int, int]],
+        # exclude_boxes: List[Tuple[int, int]],
+        # other_bot_positions: Set[Tuple[int, int]],
     ) -> None:
         """Run the state machine for a single bot worker."""
-        if worker.last_state != worker.state:
-            print(
-                f"t={controller.get_turn()} Bot {worker.bot_id} state: {worker.state}"
-            )
-            worker.last_state = worker.state
-
-        bot_id = worker.bot_id
-        bot_info = controller.get_bot_state(bot_id)
-        if bot_info is None:
+        my_bots = controller.get_team_bot_ids(controller.get_team())
+        if not my_bots:
             return
-        bx, by = bot_info["x"], bot_info["y"]
-
-        # Stuck detection: if bot hasn't moved in 5 turns, consider moving randomly
-        current_pos = (bx, by)
-        if worker.last_pos == current_pos:
-            worker.stuck_turns += 1
-        else:
-            worker.stuck_turns = 0
-            worker.last_pos = current_pos
-
-        if worker.stuck_turns >= 5:
-            # Only move randomly if:
-            # 1. We're in a blocking position (narrow corridor), OR
-            # 2. Multiple bots are stuck (deadlock)
-            is_blocking = self.is_blocking_position(bx, by)
-            num_stuck = self.count_stuck_workers()
-
-            if is_blocking or num_stuck >= 2:
-                print(
-                    f"Bot {bot_id} is stuck (blocking={is_blocking}, num_stuck={num_stuck}), moving randomly"
-                )
-                if self.move_randomly(controller, bot_id, other_bot_positions):
-                    worker.stuck_turns = 0
-                    return
-            # Otherwise, just wait in place - we're not blocking anyone
-
-        # Find workstations for this bot, excluding ones claimed by others
-        # First find shop to use as reference for cooker distance constraint
-        shop_pos = self.find_nearest_tile(controller, bx, by, "SHOP")
-
-        if worker.counter_loc is None:
-            # Only consider counters within 19 moves of the shop
-            worker.counter_loc = self.find_nearest_tile_of_types(
-                controller,
-                bx,
-                by,
-                ["COUNTER"],
-                exclude=exclude_counters,
-                avoid_positions=other_bot_positions,
-                max_distance_from=(shop_pos, 16) if shop_pos else None,
-            )
-        if worker.cooker_loc is None:
-            # Only consider cookers within 19 moves of the shop
-            worker.cooker_loc = self.find_nearest_tile_of_types(
-                controller,
-                bx,
-                by,
-                ["COOKER"],
-                exclude=exclude_cookers,
-                avoid_positions=other_bot_positions,
-                max_distance_from=(shop_pos, 19) if shop_pos else None,
-            )
-        if worker.counter_loc is None or worker.cooker_loc is None:
-            return
-        if worker.box_loc is None:
-            all_exclude = exclude_boxes + [worker.counter_loc, worker.cooker_loc]
-            worker.box_loc = self.find_nearest_tile_of_types(
-                controller,
-                bx,
-                by,
-                ["BOX", "COUNTER"],
-                exclude=all_exclude,
-                avoid_positions=other_bot_positions,
-            )
-        # print(f"Bot {bot_id} counter at {worker.counter_loc}, cooker at {worker.cooker_loc}, box at {worker.box_loc}")
-
-        if worker.box_loc is None:
-            return
-
-        cx, cy = worker.counter_loc
-        kx, ky = worker.cooker_loc
-        box_x, box_y = worker.box_loc
-
-        if not worker.current_order:
-            return
-
-        if worker.state in [
-            States.BUY_MEAT,
-            States.BUY_PLATE,
-            States.BUY_NOODLES,
-        ] and bot_info.get("holding"):
-            worker.state = States.TRASH_ITEM
-
-        if worker.state is States.INIT:
+        
+        if self.state == States.INIT:
+            worker_shop = self.worker_states["shop"]
+            worker_cooker = self.worker_states["cooker"]
+            
+            assert worker_shop is not None, "[ERROR] Worker not found: SHOP"
+            assert worker_cooker is not None, "[ERROR] Worker not found: COOKER"
+            
+            kx, ky = worker_cooker.cooker_loc
             tile = controller.get_tile(controller.get_team(), kx, ky)
+            
             if (
-                FoodType.MEAT.food_name not in worker.current_order["required"]
-                and FoodType.EGG.food_name not in worker.current_order["required"]
+                FoodType.MEAT.food_name not in self.current_order["required"]
+                and FoodType.EGG.food_name not in self.current_order["required"]
             ) or (tile and isinstance(tile.item, Pan)):
-                if FoodType.ONIONS.food_name in worker.current_order["required"]:
-                    worker.state = States.BUY_ONIONS
-                elif FoodType.MEAT.food_name in worker.current_order["required"]:
-                    worker.state = States.BUY_MEAT
-                elif FoodType.EGG.food_name in worker.current_order["required"]:
-                    worker.state = States.BUY_EGG
+                if FoodType.ONIONS.food_name in self.current_order["required"]:
+                    self.state = States.BUY_ONIONS
+                elif FoodType.MEAT.food_name in self.current_order["required"]:
+                    self.state = States.BUY_MEAT
+                elif FoodType.EGG.food_name in self.current_order["required"]:
+                    self.state = States.BUY_EGG
                 else:
-                    worker.state = States.BUY_PLATE
+                    self.state = States.BUY_PLATE
             else:
-                worker.state = States.BUY_PAN
-
-        elif worker.state == States.BUY_PAN:
-            holding = bot_info.get("holding")
-            if holding:  # assume it's the pan
-                if self.move_towards(controller, bot_id, kx, ky, other_bot_positions):
-                    if controller.place(bot_id, kx, ky):
-                        worker.state = States.BUY_MEAT
-            else:
-                shop_pos = self.find_nearest_tile(controller, bx, by, "SHOP")
-                if not shop_pos:
-                    return
-                sx, sy = shop_pos
-                if self.move_towards(controller, bot_id, sx, sy, other_bot_positions):
-                    if (
-                        controller.get_team_money(controller.get_team())
-                        >= ShopCosts.PAN.buy_cost
-                    ):
-                        controller.buy(bot_id, ShopCosts.PAN, sx, sy)
-
-        elif worker.state == States.BUY_MEAT:
-            shop_pos = self.find_nearest_tile(controller, bx, by, "SHOP")
-            if shop_pos is None:
-                return
-            sx, sy = shop_pos
-            if self.move_towards(controller, bot_id, sx, sy, other_bot_positions):
-                if (
-                    controller.get_team_money(controller.get_team())
-                    >= FoodType.MEAT.buy_cost
-                ):
-                    if controller.buy(bot_id, FoodType.MEAT, sx, sy):
-                        worker.state = States.PUT_MEAT_ON_COUNTER
-
-        elif worker.state == States.PUT_MEAT_ON_COUNTER:
-            if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
-                if controller.place(bot_id, cx, cy):
-                    worker.state = States.CHOP_MEAT
-
-        elif worker.state == States.CHOP_MEAT:
-            if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
-                if controller.chop(bot_id, cx, cy):
-                    worker.state = States.PICKUP_MEAT
-
-        elif worker.state == States.PICKUP_MEAT:
-            if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
-                if controller.pickup(bot_id, cx, cy):
-                    worker.state = States.PUT_MEAT_ON_COOKER
-
-        elif worker.state == States.PUT_MEAT_ON_COOKER:
-            if self.move_towards(controller, bot_id, kx, ky, other_bot_positions):
-                # Using the NEW logic where place() starts cooking automatically
-                if controller.place(bot_id, kx, ky):
-                    worker.state = States.BUY_PLATE
-
-        elif worker.state == States.BUY_EGG:
-            shop_pos = self.find_nearest_tile(controller, bx, by, "SHOP")
-            if not shop_pos:
-                return
-            sx, sy = shop_pos
-            if self.move_towards(controller, bot_id, sx, sy, other_bot_positions):
-                if (
-                    controller.get_team_money(controller.get_team())
-                    >= FoodType.EGG.buy_cost
-                ):
-                    if controller.buy(bot_id, FoodType.EGG, sx, sy):
-                        worker.state = States.PUT_EGG_ON_COOKER
-
-        elif worker.state == States.PUT_EGG_ON_COOKER:
-            if self.move_towards(controller, bot_id, kx, ky, other_bot_positions):
-                # Using the NEW logic where place() starts cooking automatically
-                if controller.place(bot_id, kx, ky):
-                    if FoodType.MEAT.food_name in worker.current_order["required"]:
-                        worker.state = States.WAIT_FOR_EGG
-                    else:
-                        worker.state = States.BUY_PLATE
-
-        elif worker.state == States.BUY_ONIONS:
-            shop_pos = self.find_nearest_tile(controller, bx, by, "SHOP")
-            if not shop_pos:
-                return
-            sx, sy = shop_pos
-            if self.move_towards(controller, bot_id, sx, sy, other_bot_positions):
-                if (
-                    controller.get_team_money(controller.get_team())
-                    >= FoodType.ONIONS.buy_cost
-                ):
-                    if controller.buy(bot_id, FoodType.ONIONS, sx, sy):
-                        worker.state = States.PUT_ONIONS_ON_COUNTER
-
-        elif worker.state == States.PUT_ONIONS_ON_COUNTER:
-            if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
-                if controller.place(bot_id, cx, cy):
-                    worker.state = States.CHOP_ONIONS
-
-        elif worker.state == States.CHOP_ONIONS:
-            if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
-                if controller.chop(bot_id, cx, cy):
-                    worker.state = States.PICKUP_CHOPPED_ONIONS
-
-        elif worker.state == States.PICKUP_CHOPPED_ONIONS:
-            if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
-                if controller.pickup(bot_id, cx, cy):
-                    worker.state = States.STORE_CHOPPED_ONIONS
-
-        elif worker.state == States.STORE_CHOPPED_ONIONS:
-            if self.move_towards(controller, bot_id, box_x, box_y, other_bot_positions):
-                if controller.place(bot_id, box_x, box_y):
-                    if FoodType.MEAT.food_name in worker.current_order["required"]:
-                        worker.state = States.BUY_MEAT
-                    elif FoodType.EGG.food_name in worker.current_order["required"]:
-                        worker.state = States.BUY_EGG
-                    else:
-                        worker.state = States.BUY_PLATE
-
-        elif worker.state == States.BUY_PLATE:
-            shop_pos = self.find_nearest_tile(controller, bx, by, "SHOP")
-            if not shop_pos:
-                return
-            sx, sy = shop_pos
-            if self.move_towards(controller, bot_id, sx, sy, other_bot_positions):
-                if (
-                    controller.get_team_money(controller.get_team())
-                    >= ShopCosts.PLATE.buy_cost
-                ):
-                    if controller.buy(bot_id, ShopCosts.PLATE, sx, sy):
-                        worker.state = States.PUT_PLATE_ON_COUNTER
-
-        elif worker.state == States.PUT_PLATE_ON_COUNTER:
-            if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
-                if controller.place(bot_id, cx, cy):
-                    if FoodType.MEAT.food_name in worker.current_order["required"]:
-                        worker.state = States.WAIT_FOR_MEAT
-                    elif FoodType.EGG.food_name in worker.current_order["required"]:
-                        worker.state = States.WAIT_FOR_EGG
-                    elif FoodType.ONIONS.food_name in worker.current_order["required"]:
-                        worker.state = States.RETRIEVE_BOX_ITEM
-                    elif FoodType.NOODLES.food_name in worker.current_order["required"]:
-                        worker.state = States.BUY_NOODLES
-                    else:  # FoodType.SAUCE.food_name in worker.current_order["required"]:
-                        worker.state = States.BUY_SAUCE
-
-        elif worker.state == States.BUY_NOODLES:
-            shop_pos = self.find_nearest_tile(controller, bx, by, "SHOP")
-            if not shop_pos:
-                return
-            sx, sy = shop_pos
-            if self.move_towards(controller, bot_id, sx, sy, other_bot_positions):
-                if (
-                    controller.get_team_money(controller.get_team())
-                    >= FoodType.NOODLES.buy_cost
-                ):
-                    if controller.buy(bot_id, FoodType.NOODLES, sx, sy):
-                        worker.state = States.ADD_NOODLES_TO_PLATE
-
-        elif worker.state == States.ADD_NOODLES_TO_PLATE:
-            if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
-                if controller.add_food_to_plate(bot_id, cx, cy):
-                    if FoodType.SAUCE.food_name in worker.current_order["required"]:
-                        worker.state = States.BUY_SAUCE
-                    else:
-                        worker.state = States.PICKUP_PLATE
-
-        elif worker.state == States.BUY_SAUCE:
-            shop_pos = self.find_nearest_tile(controller, bx, by, "SHOP")
-            if not shop_pos:
-                return
-            sx, sy = shop_pos
-            if self.move_towards(controller, bot_id, sx, sy, other_bot_positions):
-                if (
-                    controller.get_team_money(controller.get_team())
-                    >= FoodType.SAUCE.buy_cost
-                ):
-                    if controller.buy(bot_id, FoodType.SAUCE, sx, sy):
-                        worker.state = States.ADD_SAUCE_TO_PLATE
-
-        elif worker.state == States.ADD_SAUCE_TO_PLATE:
-            if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
-                if controller.add_food_to_plate(bot_id, cx, cy):
-                    worker.state = States.PICKUP_PLATE
-
-        elif worker.state == States.WAIT_FOR_MEAT:
-            if self.move_towards(controller, bot_id, kx, ky, other_bot_positions):
-                tile = controller.get_tile(controller.get_team(), kx, ky)
-                if tile and isinstance(tile.item, Pan) and tile.item.food:
-                    food = tile.item.food
-                    if food.cooked_stage == 1:
-                        if controller.take_from_pan(bot_id, kx, ky):
-                            worker.state = States.ADD_MEAT_TO_PLATE
-                    elif food.cooked_stage == 2:
-                        # trash
-                        if controller.take_from_pan(bot_id, kx, ky):
-                            worker.state = States.TRASH_ITEM
+                self.state = States.BUY_PAN
+                
+        elif self.state == States.BUY_PAN:
+            holding = controller.get_bot_state(self.worker_states["shop"])["holding"]
+            
+            # If pan in hand
+            if holding:
+                # If shop worker is different from cooker worker
+                # Find the nearest counter that's available to both and move towards it
+                if self.worker_states["shop"] != self.worker_states["cooker"]:
+                    if self.mutual_counter is None:
+                        self.mutual_counter = self.find_best_mutual_counter(controller)
+                        assert self.mutual_counter is not None, "[ERROR] Mutual counter not found"
+                        mx, my = self.mutual_counter
+                        
+                        
+                        if self.move_towards(controller, self.worker_states["shop"], mx, my):
+                            if controller.place(self.worker_states["shop"], mx, my):
+                                if self.move_towards(controller, self.worker_states["cooker"], mx, my):
+                                    if controller.pickup(self.worker_states["cooker"], mx, my):
+                                        if self.move_towards(controller, self.worker_states["cooker"], worker_cooker.cooker_loc[0], worker_cooker.cooker_loc[1]):
+                                            if controller.place(self.worker_states["cooker"], worker_cooker.cooker_loc[0], worker_cooker.cooker_loc[1]):
+                                                self.state = States.BUY_MEAT
+                # If shop worker is the same as cooker worker
                 else:
-                    if bot_info.get("holding"):
-                        # trash
-                        worker.state = States.TRASH_ITEM
-                    else:
-                        # restart
-                        worker.state = States.BUY_MEAT
+                    if self.move_towards(controller, self.worker_states["shop"], self.worker_states[self.worker_states["shop"]].cooker_loc[0], self.worker_states[self.worker_states["shop"]].cooker_loc[1]):
+                        if controller.place(self.worker_states["shop"], self.worker_states[self.worker_states["shop"]].cooker_loc[0], self.worker_states[self.worker_states["shop"]].cooker_loc[1]):
+                            self.state = States.BUY_MEAT
+                                
+            
+                            
 
-        elif worker.state == States.ADD_MEAT_TO_PLATE:
-            if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
-                if controller.add_food_to_plate(bot_id, cx, cy):
-                    if FoodType.EGG.food_name in worker.current_order["required"]:
-                        worker.state = States.BUY_EGG
-                    elif FoodType.ONIONS.food_name in worker.current_order["required"]:
-                        worker.state = States.RETRIEVE_BOX_ITEM
-                    elif FoodType.NOODLES.food_name in worker.current_order["required"]:
-                        worker.state = States.BUY_NOODLES
-                    elif FoodType.SAUCE.food_name in worker.current_order["required"]:
-                        worker.state = States.BUY_SAUCE
-                    else:
-                        worker.state = States.PICKUP_PLATE
-
-        elif worker.state == States.WAIT_FOR_EGG:
-            if self.move_towards(controller, bot_id, kx, ky, other_bot_positions):
-                tile = controller.get_tile(controller.get_team(), kx, ky)
-                if tile and isinstance(tile.item, Pan) and tile.item.food:
-                    food = tile.item.food
-                    if food.cooked_stage == 1:
-                        if controller.take_from_pan(bot_id, kx, ky):
-                            worker.state = States.ADD_EGG_TO_PLATE
-                    elif food.cooked_stage == 2:
-                        # trash
-                        if controller.take_from_pan(bot_id, kx, ky):
-                            worker.state = States.TRASH_ITEM
-                else:
-                    if bot_info.get("holding"):
-                        # trash
-                        worker.state = States.TRASH_ITEM
-                    else:
-                        # restart
-                        worker.state = States.BUY_EGG
-
-        elif worker.state == States.ADD_EGG_TO_PLATE:
-            if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
-                if controller.add_food_to_plate(bot_id, cx, cy):
-                    if FoodType.ONIONS.food_name in worker.current_order["required"]:
-                        worker.state = States.RETRIEVE_BOX_ITEM
-                    elif FoodType.NOODLES.food_name in worker.current_order["required"]:
-                        worker.state = States.BUY_NOODLES
-                    elif FoodType.SAUCE.food_name in worker.current_order["required"]:
-                        worker.state = States.BUY_SAUCE
-                    else:
-                        worker.state = States.PICKUP_PLATE
-
-        elif worker.state == States.RETRIEVE_BOX_ITEM:
-            if self.move_towards(controller, bot_id, box_x, box_y, other_bot_positions):
-                if controller.pickup(bot_id, box_x, box_y):
-                    worker.state = States.PLATE_BOX_ITEM
-
-        elif worker.state == States.PLATE_BOX_ITEM:
-            if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
-                if controller.add_food_to_plate(bot_id, cx, cy):
-                    if FoodType.NOODLES.food_name in worker.current_order["required"]:
-                        worker.state = States.BUY_NOODLES
-                    elif FoodType.SAUCE.food_name in worker.current_order["required"]:
-                        worker.state = States.BUY_SAUCE
-                    else:
-                        worker.state = States.PICKUP_PLATE
-
-        elif worker.state == States.PICKUP_PLATE:
-            if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
-                if controller.pickup(bot_id, cx, cy):
-                    worker.state = States.SUBMIT_ORDER
-
-        elif worker.state == States.SUBMIT_ORDER:
-            submit_pos = self.find_nearest_tile(controller, bx, by, "SUBMIT")
-            if not submit_pos:
-                return
-            ux, uy = submit_pos
-            if controller.get_turn() > worker.current_order["expires_turn"]:
-                # order expired, trash plate items then discard plate
-                worker.state = States.TRASH_PLATE
-                return
-            elif self.move_towards(controller, bot_id, ux, uy, other_bot_positions):
-                if controller.submit(bot_id, ux, uy):
-                    worker.state = States.INIT
-                    self.fulfilled_orders.add(worker.current_order["order_id"])
-                    self.claimed_orders.discard(worker.current_order["order_id"])
-                    worker.current_order = None
-                    # Reset workstation locations for next order
-                    worker.counter_loc = None
-                    worker.cooker_loc = None
-                    worker.box_loc = None
-
-        elif worker.state == States.TRASH_ITEM:
-            trash_pos = self.find_nearest_tile(controller, bx, by, "TRASH")
-            if not trash_pos:
-                return
-            tx, ty = trash_pos
-            if self.move_towards(controller, bot_id, tx, ty, other_bot_positions):
-                if controller.trash(bot_id, tx, ty):
-                    worker.state = States.INIT
-                    if worker.current_order:
-                        self.claimed_orders.discard(worker.current_order["order_id"])
-                    worker.current_order = None
-                    # Reset workstation locations for next order
-                    worker.counter_loc = None
-                    worker.cooker_loc = None
-                    worker.box_loc = None
-
-        elif worker.state == States.TRASH_PLATE:
-            # Trash the items on the plate, then put the empty plate on a counter
-            trash_pos = self.find_nearest_tile(controller, bx, by, "TRASH")
-            if not trash_pos:
-                return
-            tx, ty = trash_pos
-            if self.move_towards(controller, bot_id, tx, ty, other_bot_positions):
-                if controller.trash(bot_id, tx, ty):
-                    # After trashing items, discard the empty plate
-                    worker.state = States.DISCARD_PLATE
-
-        elif worker.state == States.DISCARD_PLATE:
-            # Put the empty plate on a counter (can't trash empty plates)
-            # Find any counter to place it on
-            px, py = worker.counter_loc
-            if self.move_towards(controller, bot_id, px, py, other_bot_positions):
-                if controller.place(bot_id, px, py):
-                    worker.state = States.INIT
-                    if worker.current_order:
-                        self.claimed_orders.discard(worker.current_order["order_id"])
-                    worker.current_order = None
-                    # Reset workstation locations for next order
-                    worker.counter_loc = None
-                    worker.cooker_loc = None
-                    worker.box_loc = None
+            
