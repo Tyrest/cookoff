@@ -77,7 +77,7 @@ class BotPlayer:
         reachable = set()
         queue = deque([(start_x, start_y)])
         w, h = self.map.width, self.map.height
-        
+
         while queue:
             x, y = queue.popleft()
             if (x, y) in reachable:
@@ -102,14 +102,14 @@ class BotPlayer:
         my_bots = controller.get_team_bot_ids(controller.get_team())
         if len(my_bots) <= 1:
             return True  # Single bot, no separation possible
-        
+
         # Get flood fill from first bot
         first_bot = my_bots[0]
         first_state = controller.get_bot_state(first_bot)
         if not first_state:
             return True
         first_area = self._flood_fill(first_state["x"], first_state["y"])
-        
+
         # Check if all other bots are in the same area
         for bot_id in my_bots[1:]:
             bot_state = controller.get_bot_state(bot_id)
@@ -117,9 +117,11 @@ class BotPlayer:
                 continue
             bot_pos = (bot_state["x"], bot_state["y"])
             if bot_pos not in first_area:
-                print(f"Bots are in separate areas! Bot {first_bot} and Bot {bot_id} cannot reach each other.")
+                print(
+                    f"Bots are in separate areas! Bot {first_bot} and Bot {bot_id} cannot reach each other."
+                )
                 return False
-        
+
         print("All bots share the same walkable area.")
         return True
 
@@ -479,10 +481,13 @@ class BotPlayer:
                 # Bots are in separate areas, delegate to teamwork_bot
                 try:
                     from teamwork_bot import BotPlayer as TeamworkBotPlayer
+
                     self._delegate_bot = TeamworkBotPlayer(self.map)
                     print("Delegating to teamwork_bot for separate area coordination.")
                 except ImportError:
-                    print("WARNING: teamwork_bot not found, falling back to basic_bot logic.")
+                    print(
+                        "WARNING: teamwork_bot not found, falling back to basic_bot logic."
+                    )
                     self._bots_share_area = True  # Fall back to current logic
 
         # Delegate to teamwork_bot if bots are in separate areas
