@@ -1,0 +1,41 @@
+################
+#...C..C..$....#
+#...K.....U.R..#
+#...S.....T.B..#
+#......b.......#
+################
+
+SWITCH: turn=250 duration=100
+
+ORDERS:
+start=0 duration=10000 required=EGG reward=10000 penalty=3
+start=0 duration=10000 required=MEAT reward=10000 penalty=3
+start=0 duration=10000 required=NOODLES reward=10000 penalty=3
+start=0 duration=10000 required=ONIONS reward=10000 penalty=3
+start=0 duration=10000 required=SAUCE reward=10000 penalty=3
+start=0 duration=10000 required=EGG,MEAT reward=10000 penalty=3
+start=0 duration=10000 required=EGG,NOODLES reward=10000 penalty=3
+start=0 duration=10000 required=EGG,ONIONS reward=10000 penalty=3
+start=0 duration=10000 required=EGG,SAUCE reward=10000 penalty=3
+start=0 duration=10000 required=MEAT,NOODLES reward=10000 penalty=3
+start=0 duration=10000 required=MEAT,ONIONS reward=10000 penalty=3
+start=0 duration=10000 required=MEAT,SAUCE reward=10000 penalty=3
+start=0 duration=10000 required=NOODLES,ONIONS reward=10000 penalty=3
+start=0 duration=10000 required=NOODLES,SAUCE reward=10000 penalty=3
+start=0 duration=10000 required=ONIONS,SAUCE reward=10000 penalty=3
+start=0 duration=10000 required=EGG,MEAT,NOODLES reward=10000 penalty=3
+start=0 duration=10000 required=EGG,MEAT,ONIONS reward=10000 penalty=3
+start=0 duration=10000 required=EGG,MEAT,SAUCE reward=10000 penalty=3
+start=0 duration=10000 required=EGG,NOODLES,ONIONS reward=10000 penalty=3
+start=0 duration=10000 required=EGG,NOODLES,SAUCE reward=10000 penalty=3
+start=0 duration=10000 required=EGG,ONIONS,SAUCE reward=10000 penalty=3
+start=0 duration=10000 required=MEAT,NOODLES,ONIONS reward=10000 penalty=3
+start=0 duration=10000 required=MEAT,NOODLES,SAUCE reward=10000 penalty=3
+start=0 duration=10000 required=MEAT,ONIONS,SAUCE reward=10000 penalty=3
+start=0 duration=10000 required=NOODLES,ONIONS,SAUCE reward=10000 penalty=3
+start=0 duration=10000 required=EGG,MEAT,NOODLES,ONIONS reward=10000 penalty=3
+start=0 duration=10000 required=EGG,MEAT,NOODLES,SAUCE reward=10000 penalty=3
+start=0 duration=10000 required=EGG,MEAT,ONIONS,SAUCE reward=10000 penalty=3
+start=0 duration=10000 required=EGG,NOODLES,ONIONS,SAUCE reward=10000 penalty=3
+start=0 duration=10000 required=MEAT,NOODLES,ONIONS,SAUCE reward=10000 penalty=3
+start=0 duration=10000 required=EGG,MEAT,NOODLES,ONIONS,SAUCE reward=10000 penalty=3
