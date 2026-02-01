@@ -599,8 +599,7 @@ class BotPlayer:
             else:
                 self.sabotage = False
                 self.sabotage_state = None
-                if DEBUG:
-                    print(f"Recovered from sabotage state at turn {controller.get_turn()}")
+                print(f"Recovered from sabotage state at turn {controller.get_turn()}")
             
         # Check condition for sabotage
         if controller.get_turn() in range(250, 325) and controller.can_switch_maps():
@@ -626,13 +625,8 @@ class BotPlayer:
                 if controller.switch_maps():
                     self.sabotage = True
                     self.sabotage_state = SabotageState.MOVE_TO_PAN
-                    
-                    if DEBUG:
-                        print(f"Sabotage state activated at turn {controller.get_turn()}")
-                        worker_states_str = ", ".join(
-                            str(self.worker_states[bot_id].state) for bot_id in my_bots if bot_id in self.worker_states
-                        )
-                        print(f"Worker states: {worker_states_str}")
+                    print(f"Sabotage state activated at turn {controller.get_turn()}")
+                    print(f"Worker states: {self.worker_states[my_bots[0]].state}, {self.worker_states[my_bots[1]].state}")
                     
                     # Save snapshot of the worker states
                     self.snapshot = copy.deepcopy(self.worker_states)
@@ -1169,8 +1163,7 @@ class BotPlayer:
             if trash:
                 if self.move_towards(controller, bot0_id, trash[0], trash[1]):
                     if controller.trash(bot0_id, trash[0], trash[1]):
-                        if DEBUG:
-                            print(f"Bot 0 threw away food in pan at turn {controller.get_turn()}")
+                        print(f"Bot 0 threw away food in pan at turn {controller.get_turn()}")
                         self.sabotage_state = SabotageState.PLACE_PAN_ON_COUNTER
                         return
                     
@@ -1179,8 +1172,7 @@ class BotPlayer:
             if counter:
                 if self.move_towards(controller, bot0_id, counter[0], counter[1]):
                     if controller.place(bot0_id, counter[0], counter[1]):
-                        if DEBUG:
-                            print(f"Bot 0 placed pan on counter at turn {controller.get_turn()}")
+                        print(f"Bot 0 placed pan on counter at turn {controller.get_turn()}")
                         self.sabotage_state = SabotageState.MOVE_TO_PLATE
                         return
                         
@@ -1199,8 +1191,7 @@ class BotPlayer:
             if trash:
                 if self.move_towards(controller, bot0_id, trash[0], trash[1]):
                     if controller.trash(bot0_id, trash[0], trash[1]):
-                        if DEBUG:
-                            print(f"Bot 0 threw away plate at turn {controller.get_turn()}")
+                        print(f"Bot 0 threw away plate at turn {controller.get_turn()}")
                         self.sabotage_state = SabotageState.MOVE_TO_PAN
                         return
                     
