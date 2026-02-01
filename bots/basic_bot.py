@@ -618,6 +618,57 @@ class BotPlayer:
                 all_cookers.append(worker.cooker_loc)
             if worker.box_loc:
                 all_boxes.append(worker.box_loc)
+                
+        # If sabotage state is active, enter sabotage state
+        if self.sabotage:
+            switch_info = controller.get_switch_info()
+            
+            if switch_info["window_active"]:
+                self.run_sabotage(controller)
+                return 
+            # Recover from sabotage state
+            else:
+                self.sabotage = False
+                self.sabotage_state = None
+                if DEBUG:
+                    print(f"Recovered from sabotage state at turn {controller.get_turn()}")
+            
+        # Check condition for sabotage
+        if controller.get_turn() in range(250, 325) and controller.can_switch_maps():
+            # Check the states of the workers
+            # 1. If no worker is holding anything
+            # 2. If no cooker is cooking anything
+            flag = True
+            for worker in self.worker_states.values():
+                if controller.get_bot_state(worker.bot_id).get("holding"):
+                    flag = False
+                    break
+                if worker.state in [States.WAIT_FOR_EGG, States.WAIT_FOR_MEAT]:
+                    flag = False
+                    break
+                # Check if pan is cooking
+                for cooker in all_cookers:
+                    pan = controller.get_tile(controller.get_team(), cooker[0], cooker[1]).item
+                    if isinstance(pan, Pan) and pan.food is not None and pan.food.cooked_stage == 0:
+                        flag = False
+                        break
+                
+            if flag:
+                if controller.switch_maps():
+                    self.sabotage = True
+                    self.sabotage_state = SabotageState.MOVE_TO_PAN
+                    
+                    if DEBUG:
+                        print(f"Sabotage state activated at turn {controller.get_turn()}")
+                        worker_states_str = ", ".join(
+                            str(self.worker_states[bot_id].state) for bot_id in my_bots if bot_id in self.worker_states
+                        )
+                        print(f"Worker states: {worker_states_str}")
+                    
+                    # Save snapshot of the worker states
+                    self.snapshot = copy.deepcopy(self.worker_states)
+                    self.run_sabotage(controller)
+                    return
 
         # Run each bot independently
         for i, bot_id in enumerate(my_bots):
@@ -1161,3 +1212,76 @@ class BotPlayer:
                     worker.counter_loc = None
                     worker.cooker_loc = None
                     worker.box_loc = None
+
+    def run_sabotage(self, controller: RobotController):
+        my_bots = controller.get_team_bot_ids(controller.get_team())
+        if not my_bots:
+            return
+        
+        m = controller.get_map(controller.get_enemy_team())
+        bot0_id = my_bots[0]
+        bot0_state = controller.get_bot_state(bot0_id)
+        if not bot0_state:
+            return
+        bot0_x, bot0_y = bot0_state["x"], bot0_state["y"]
+        
+        enemy_bots = controller.get_team_bot_ids(controller.get_enemy_team())
+        enemy_pos = [(controller.get_bot_state(bot_id)["x"], controller.get_bot_state(bot_id)["y"]) for bot_id in enemy_bots]
+        
+        my_pos = [(controller.get_bot_state(bot_id)["x"], controller.get_bot_state(bot_id)["y"]) for bot_id in my_bots]
+        my_pos.remove((bot0_x, bot0_y))
+        
+        other_bot_positions = set(enemy_pos + my_pos)
+        
+        if self.sabotage_state == SabotageState.MOVE_TO_PAN:
+            for mx in range(m.width):
+                for my in range(m.height):
+                    if isinstance(m.tiles[mx][my].item, Pan):
+                        # Pick up the pan
+                        if self.move_towards(controller, bot0_id, mx, my, other_bot_positions):
+                            if controller.pickup(bot0_id, mx, my):
+                                self.sabotage_state = SabotageState.MOVE_TO_TRASH
+                                return 
+                                
+        elif self.sabotage_state == SabotageState.MOVE_TO_TRASH:
+            trash = self.find_nearest_tile(controller, bot0_x, bot0_y, "TRASH")
+            if trash:
+                if self.move_towards(controller, bot0_id, trash[0], trash[1], other_bot_positions):
+                    if controller.trash(bot0_id, trash[0], trash[1]):
+                        if DEBUG:
+                            print(f"Bot 0 threw away food in pan at turn {controller.get_turn()}")
+                        self.sabotage_state = SabotageState.PLACE_PAN_ON_COUNTER
+                        return
+                    
+        elif self.sabotage_state == SabotageState.PLACE_PAN_ON_COUNTER:
+            counter = self.find_nearest_tile(controller, bot0_x, bot0_y, "COUNTER")
+            if counter:
+                if self.move_towards(controller, bot0_id, counter[0], counter[1], other_bot_positions):
+                    if controller.place(bot0_id, counter[0], counter[1]):
+                        if DEBUG:
+                            print(f"Bot 0 placed pan on counter at turn {controller.get_turn()}")
+                        self.sabotage_state = SabotageState.MOVE_TO_PLATE
+                        return
+                        
+        elif self.sabotage_state == SabotageState.MOVE_TO_PLATE:
+            for mx in range(m.width):
+                for my in range(m.height):
+                    if isinstance(m.tiles[mx][my].item, Plate):
+                        # Pick up the plate
+                        if self.move_towards(controller, bot0_id, mx, my, other_bot_positions):
+                            if controller.pickup(bot0_id, mx, my):
+                                self.sabotage_state = SabotageState.MOVE_TO_TRASH
+                                return
+                                
+        elif self.sabotage_state == SabotageState.MOVE_TO_TRASH:
+            trash = self.find_nearest_tile(controller, bot0_x, bot0_y, "TRASH")
+            if trash:
+                if self.move_towards(controller, bot0_id, trash[0], trash[1], other_bot_positions):
+                    if controller.trash(bot0_id, trash[0], trash[1]):
+                        if DEBUG:
+                            print(f"Bot 0 threw away plate at turn {controller.get_turn()}")
+                        self.sabotage_state = SabotageState.MOVE_TO_PAN
+                        return
+                    
+        
+        
