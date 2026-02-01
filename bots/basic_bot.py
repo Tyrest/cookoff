@@ -595,70 +595,73 @@ class BotPlayer:
                 print(f"Bot {worker.bot_id} selected order: {best_order}")
 
     def play_turn(self, controller: RobotController):
-        my_bots = controller.get_team_bot_ids(controller.get_team())
-        if not my_bots:
-            return
+        try: 
+            my_bots = controller.get_team_bot_ids(controller.get_team())
+            if not my_bots:
+                return
 
-        # Analyze capabilities on first turn
-        self._analyze_capabilities(controller)
+            # Analyze capabilities on first turn
+            self._analyze_capabilities(controller)
 
-        # Initialize worker states for each bot
-        for bot_id in my_bots:
-            if bot_id not in self.worker_states:
-                self.worker_states[bot_id] = BotWorkerState(bot_id)
+            # Initialize worker states for each bot
+            for bot_id in my_bots:
+                if bot_id not in self.worker_states:
+                    self.worker_states[bot_id] = BotWorkerState(bot_id)
 
-        # Get all other bots' locations to use as exclusions
-        all_counters = []
-        all_cookers = []
-        all_boxes = []
-        for worker in self.worker_states.values():
-            if worker.counter_loc:
-                all_counters.append(worker.counter_loc)
-            if worker.cooker_loc:
-                all_cookers.append(worker.cooker_loc)
-            if worker.box_loc:
-                all_boxes.append(worker.box_loc)
+            # Get all other bots' locations to use as exclusions
+            all_counters = []
+            all_cookers = []
+            all_boxes = []
+            for worker in self.worker_states.values():
+                if worker.counter_loc:
+                    all_counters.append(worker.counter_loc)
+                if worker.cooker_loc:
+                    all_cookers.append(worker.cooker_loc)
+                if worker.box_loc:
+                    all_boxes.append(worker.box_loc)
 
-        # Run each bot independently
-        for i, bot_id in enumerate(my_bots):
-            worker = self.worker_states[bot_id]
+            # Run each bot independently
+            for i, bot_id in enumerate(my_bots):
+                worker = self.worker_states[bot_id]
 
-            # Select order if none
-            if worker.current_order is None:
-                self.select_next_order(controller, worker)
-
+                # Select order if none
                 if worker.current_order is None:
-                    continue
+                    self.select_next_order(controller, worker)
 
-            # Get exclusions (tiles claimed by other bots)
-            other_counters = [
-                ws.counter_loc
-                for ws in self.worker_states.values()
-                if ws.bot_id != bot_id and ws.counter_loc
-            ]
-            other_cookers = [
-                ws.cooker_loc
-                for ws in self.worker_states.values()
-                if ws.bot_id != bot_id and ws.cooker_loc
-            ]
-            other_boxes = [
-                ws.box_loc
-                for ws in self.worker_states.values()
-                if ws.bot_id != bot_id and ws.box_loc
-            ] + other_counters
+                    if worker.current_order is None:
+                        continue
 
-            # Get other bot positions for proximity-aware pathfinding
-            other_bot_positions = self.get_other_bot_positions(controller, bot_id)
+                # Get exclusions (tiles claimed by other bots)
+                other_counters = [
+                    ws.counter_loc
+                    for ws in self.worker_states.values()
+                    if ws.bot_id != bot_id and ws.counter_loc
+                ]
+                other_cookers = [
+                    ws.cooker_loc
+                    for ws in self.worker_states.values()
+                    if ws.bot_id != bot_id and ws.cooker_loc
+                ]
+                other_boxes = [
+                    ws.box_loc
+                    for ws in self.worker_states.values()
+                    if ws.bot_id != bot_id and ws.box_loc
+                ] + other_counters
 
-            self.run_worker(
-                controller,
-                worker,
-                other_counters,
-                other_cookers,
-                other_boxes,
-                other_bot_positions,
-            )
+                # Get other bot positions for proximity-aware pathfinding
+                other_bot_positions = self.get_other_bot_positions(controller, bot_id)
 
+                self.run_worker(
+                    controller,
+                    worker,
+                    other_counters,
+                    other_cookers,
+                    other_boxes,
+                    other_bot_positions,
+                )
+        except:
+            pass
+        
     def run_worker(
         self,
         controller: RobotController,
