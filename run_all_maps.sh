@@ -12,7 +12,7 @@ for map in maps/*.txt maps/**/*.txt; do
     echo ""
     echo "Map: $map"
     echo "---"
-    output=$(python src/game.py --red bots/do_nothing_bot.py --blue bots/basic_bot.py --map "$map" 2>&1)
+    output=$(python src/game.py --red bots/do_nothing_bot.py --blue bots/basic_bot.py --map "$map" > logs/$(basename $map).log 2>&1)
     result=$(echo "$output" | grep -E "(GAME|winner|Winner|WIN|crashed|failed|Final)" | tail -5)
     if [ -z "$result" ]; then
         result=$(echo "$output" | tail -3)
