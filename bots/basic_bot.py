@@ -1,9 +1,10 @@
 import heapq
 import itertools
 import random
-import copy
 
-from collections import deque
+import copy
+from collections import deque, Counter
+
 from enum import Enum, auto
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -12,7 +13,43 @@ from item import Food, Pan, Plate
 from robot_controller import RobotController
 from time import time
 
-DEBUG = False
+
+DEBUG = True
+
+
+def required_counter(order) -> Counter:
+    # order["required"] is a list and can contain duplicates like ["EGG","EGG"]
+    return Counter(order["required"])
+
+
+def plate_counter_from_tile(tile, controller: RobotController) -> Counter:
+    """
+    Return counts of food_name on a plate on this tile.
+    Uses item_to_public_dict so we don't rely on internal state.
+    """
+    if not tile or not tile.item:
+        return Counter()
+
+    pub = controller.item_to_public_dict(
+        tile.item
+    )  # allowed API :contentReference[oaicite:1]{index=1}
+    if not isinstance(pub, dict) or pub.get("type") != "Plate":
+        return Counter()
+
+    foods = pub.get(
+        "food", []
+    )  # list of food dicts :contentReference[oaicite:2]{index=2}
+    return Counter(
+        f.get("food_name") for f in foods if isinstance(f, dict) and f.get("food_name")
+    )
+
+
+def remaining_needed(order, plate_counts: Counter) -> Counter:
+    need = required_counter(order)
+    # subtract what we already plated
+    need.subtract(plate_counts)
+    # keep only positive needs
+    return Counter({k: v for k, v in need.items() if v > 0})
 
 
 class States(Enum):
@@ -47,8 +84,8 @@ class States(Enum):
     DISCARD_PLATE = auto()  # Put empty plate on counter after trashing items
     RETRIEVE_BOX_ITEM = auto()
     PLATE_BOX_ITEM = auto()
-    
-    
+
+
 class SabotageState(Enum):
     MOVE_TO_PAN = auto()
     MOVE_TO_TRASH = auto()
@@ -70,6 +107,7 @@ class BotWorkerState:
         # Stuck detection
         self.last_pos: Optional[Tuple[int, int]] = None
         self.stuck_turns: int = 0
+        self.has_plate: bool = False
 
 
 class BotPlayer:
@@ -78,7 +116,7 @@ class BotPlayer:
         self.fulfilled_orders: set[int] = set()
         self.claimed_orders: set[int] = set()  # Orders claimed by any bot
         self.worker_states: dict[int, BotWorkerState] = {}  # Per-bot state
-        
+
         # Sabotage state
         self.sabotage = False
         self.snapshot = None
@@ -519,14 +557,23 @@ class BotPlayer:
         available_money = team_money - reserved_money * 0.5
 
         for order in orders:
+            meat_count, ontions_count = 0, 0
+            for ingredient in order["required"]:
+                if ingredient == FoodType.MEAT.food_name:
+                    meat_count += 1
+                if ingredient == FoodType.ONIONS.food_name:
+                    ontions_count += 1
+            if meat_count > 1 or ontions_count > 1:
+                continue
+
             order_id = order["order_id"]
             # Skip if already fulfilled or claimed by another bot
             if order_id in self.fulfilled_orders or order_id in self.claimed_orders:
                 continue
-            # Skip orders with duplicate ingredients
+            # # Skip orders with duplicate ingredients
             required = order["required"]
-            if len(required) != len(set(required)):
-                continue
+            # if len(required) != len(set(required)):
+            #     continue
             # Skip orders we can't fulfill due to missing tiles
             if not self._has_cooker:
                 if (
@@ -587,20 +634,20 @@ class BotPlayer:
                 all_cookers.append(worker.cooker_loc)
             if worker.box_loc:
                 all_boxes.append(worker.box_loc)
-                
+
         # If sabotage state is active, enter sabotage state
         if self.sabotage:
             switch_info = controller.get_switch_info()
-            
+
             if switch_info["window_active"]:
                 self.run_sabotage(controller)
-                return 
+                return
             # Recover from sabotage state
             else:
                 self.sabotage = False
                 self.sabotage_state = None
                 print(f"Recovered from sabotage state at turn {controller.get_turn()}")
-            
+
         # Check condition for sabotage
         if controller.get_turn() in range(250, 325) and controller.can_switch_maps():
             # Check the states of the workers
@@ -616,23 +663,31 @@ class BotPlayer:
                     break
                 # Check if pan is cooking
                 for cooker in all_cookers:
-                    pan = controller.get_tile(controller.get_team(), cooker[0], cooker[1]).item
-                    if isinstance(pan, Pan) and pan.food is not None and pan.food.cooked_stage == 0:
+                    pan = controller.get_tile(
+                        controller.get_team(), cooker[0], cooker[1]
+                    ).item
+                    if (
+                        isinstance(pan, Pan)
+                        and pan.food is not None
+                        and pan.food.cooked_stage == 0
+                    ):
                         flag = False
                         break
-                
+
             if flag:
                 if controller.switch_maps():
                     self.sabotage = True
                     self.sabotage_state = SabotageState.MOVE_TO_PAN
                     print(f"Sabotage state activated at turn {controller.get_turn()}")
-                    print(f"Worker states: {self.worker_states[my_bots[0]].state}, {self.worker_states[my_bots[1]].state}")
-                    
+                    print(
+                        f"Worker states: {self.worker_states[my_bots[0]].state}, {self.worker_states[my_bots[1]].state}"
+                    )
+
                     # Save snapshot of the worker states
                     self.snapshot = copy.deepcopy(self.worker_states)
                     self.run_sabotage(controller)
                     return
-            
+
         # TODO: Implement recovering from sabotage state
         # ...
 
@@ -643,6 +698,7 @@ class BotPlayer:
             # Select order if none
             if worker.current_order is None:
                 self.select_next_order(controller, worker)
+
                 if worker.current_order is None:
                     continue
 
@@ -881,6 +937,8 @@ class BotPlayer:
                 if controller.place(bot_id, kx, ky):
                     if FoodType.MEAT.food_name in worker.current_order["required"]:
                         worker.state = States.WAIT_FOR_EGG
+                    elif worker.has_plate:
+                        worker.state = States.WAIT_FOR_EGG
                     else:
                         worker.state = States.BUY_PLATE
 
@@ -938,6 +996,7 @@ class BotPlayer:
         elif worker.state == States.PUT_PLATE_ON_COUNTER:
             if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
                 if controller.place(bot_id, cx, cy):
+                    worker.has_plate = True
                     if FoodType.MEAT.food_name in worker.current_order["required"]:
                         worker.state = States.WAIT_FOR_MEAT
                     elif FoodType.EGG.food_name in worker.current_order["required"]:
@@ -965,7 +1024,13 @@ class BotPlayer:
         elif worker.state == States.ADD_NOODLES_TO_PLATE:
             if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
                 if controller.add_food_to_plate(bot_id, cx, cy):
-                    if FoodType.SAUCE.food_name in worker.current_order["required"]:
+                    tile = controller.get_tile(controller.get_team(), cx, cy)
+                    need = remaining_needed(
+                        worker.current_order, plate_counter_from_tile(tile, controller)
+                    )
+                    if need.get(FoodType.NOODLES.food_name, 0) > 0:
+                        worker.state = States.BUY_NOODLES
+                    elif need.get(FoodType.SAUCE.food_name, 0) > 0:
                         worker.state = States.BUY_SAUCE
                     else:
                         worker.state = States.PICKUP_PLATE
@@ -986,7 +1051,14 @@ class BotPlayer:
         elif worker.state == States.ADD_SAUCE_TO_PLATE:
             if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
                 if controller.add_food_to_plate(bot_id, cx, cy):
-                    worker.state = States.PICKUP_PLATE
+                    tile = controller.get_tile(controller.get_team(), cx, cy)
+                    need = remaining_needed(
+                        worker.current_order, plate_counter_from_tile(tile, controller)
+                    )
+                    if need.get(FoodType.SAUCE.food_name, 0) > 0:
+                        worker.state = States.BUY_SAUCE
+                    else:
+                        worker.state = States.PICKUP_PLATE
 
         elif worker.state == States.WAIT_FOR_MEAT:
             if self.move_towards(controller, bot_id, kx, ky, other_bot_positions):
@@ -1011,13 +1083,20 @@ class BotPlayer:
         elif worker.state == States.ADD_MEAT_TO_PLATE:
             if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
                 if controller.add_food_to_plate(bot_id, cx, cy):
-                    if FoodType.EGG.food_name in worker.current_order["required"]:
+                    tile = controller.get_tile(controller.get_team(), cx, cy)
+                    need = remaining_needed(
+                        worker.current_order, plate_counter_from_tile(tile, controller)
+                    )
+
+                    if need.get(FoodType.MEAT.food_name, 0) > 0:
+                        worker.state = States.BUY_MEAT
+                    elif need.get(FoodType.EGG.food_name, 0) > 0:
                         worker.state = States.BUY_EGG
-                    elif FoodType.ONIONS.food_name in worker.current_order["required"]:
+                    elif need.get(FoodType.ONIONS.food_name, 0) > 0:
                         worker.state = States.RETRIEVE_BOX_ITEM
-                    elif FoodType.NOODLES.food_name in worker.current_order["required"]:
+                    elif need.get(FoodType.NOODLES.food_name, 0) > 0:
                         worker.state = States.BUY_NOODLES
-                    elif FoodType.SAUCE.food_name in worker.current_order["required"]:
+                    elif need.get(FoodType.SAUCE.food_name, 0) > 0:
                         worker.state = States.BUY_SAUCE
                     else:
                         worker.state = States.PICKUP_PLATE
@@ -1045,11 +1124,22 @@ class BotPlayer:
         elif worker.state == States.ADD_EGG_TO_PLATE:
             if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
                 if controller.add_food_to_plate(bot_id, cx, cy):
-                    if FoodType.ONIONS.food_name in worker.current_order["required"]:
+                    tile = controller.get_tile(controller.get_team(), cx, cy)
+                    need = remaining_needed(
+                        worker.current_order, plate_counter_from_tile(tile, controller)
+                    )
+
+                    if need.get(FoodType.EGG.food_name, 0) > 0:
+                        worker.state = States.BUY_EGG
+                    elif need.get(FoodType.ONIONS.food_name, 0) > 0:
                         worker.state = States.RETRIEVE_BOX_ITEM
-                    elif FoodType.NOODLES.food_name in worker.current_order["required"]:
+                    elif need.get(FoodType.MEAT.food_name, 0) > 0:
+                        worker.state = (
+                            States.BUY_MEAT
+                        )  # or WAIT_FOR_MEAT depending on your flow
+                    elif need.get(FoodType.NOODLES.food_name, 0) > 0:
                         worker.state = States.BUY_NOODLES
-                    elif FoodType.SAUCE.food_name in worker.current_order["required"]:
+                    elif need.get(FoodType.SAUCE.food_name, 0) > 0:
                         worker.state = States.BUY_SAUCE
                     else:
                         worker.state = States.PICKUP_PLATE
@@ -1062,9 +1152,16 @@ class BotPlayer:
         elif worker.state == States.PLATE_BOX_ITEM:
             if self.move_towards(controller, bot_id, cx, cy, other_bot_positions):
                 if controller.add_food_to_plate(bot_id, cx, cy):
-                    if FoodType.NOODLES.food_name in worker.current_order["required"]:
+                    tile = controller.get_tile(controller.get_team(), cx, cy)
+                    need = remaining_needed(
+                        worker.current_order, plate_counter_from_tile(tile, controller)
+                    )
+
+                    if need.get(FoodType.ONIONS.food_name, 0) > 0:
+                        worker.state = States.RETRIEVE_BOX_ITEM
+                    elif need.get(FoodType.NOODLES.food_name, 0) > 0:
                         worker.state = States.BUY_NOODLES
-                    elif FoodType.SAUCE.food_name in worker.current_order["required"]:
+                    elif need.get(FoodType.SAUCE.food_name, 0) > 0:
                         worker.state = States.BUY_SAUCE
                     else:
                         worker.state = States.PICKUP_PLATE
@@ -1076,6 +1173,7 @@ class BotPlayer:
 
         elif worker.state == States.SUBMIT_ORDER:
             submit_pos = self.find_nearest_tile(controller, bx, by, "SUBMIT")
+            worker.has_plate = False
             if not submit_pos:
                 return
             ux, uy = submit_pos
@@ -1140,14 +1238,14 @@ class BotPlayer:
         my_bots = controller.get_team_bot_ids(controller.get_team())
         if not my_bots:
             return
-        
+
         m = controller.get_map(controller.get_enemy_team())
         bot0_id = my_bots[0]
         bot0_state = controller.get_bot_state(bot0_id)
         if not bot0_state:
             return
         bot0_x, bot0_y = bot0_state["x"], bot0_state["y"]
-        
+
         if self.sabotage_state == SabotageState.MOVE_TO_PAN:
             for mx in range(m.width):
                 for my in range(m.height):
@@ -1156,26 +1254,30 @@ class BotPlayer:
                         if self.move_towards(controller, bot0_id, mx, my):
                             if controller.pickup(bot0_id, mx, my):
                                 self.sabotage_state = SabotageState.MOVE_TO_TRASH
-                                return 
-                                
+                                return
+
         elif self.sabotage_state == SabotageState.MOVE_TO_TRASH:
             trash = self.find_nearest_tile(controller, bot0_x, bot0_y, "TRASH")
             if trash:
                 if self.move_towards(controller, bot0_id, trash[0], trash[1]):
                     if controller.trash(bot0_id, trash[0], trash[1]):
-                        print(f"Bot 0 threw away food in pan at turn {controller.get_turn()}")
+                        print(
+                            f"Bot 0 threw away food in pan at turn {controller.get_turn()}"
+                        )
                         self.sabotage_state = SabotageState.PLACE_PAN_ON_COUNTER
                         return
-                    
+
         elif self.sabotage_state == SabotageState.PLACE_PAN_ON_COUNTER:
             counter = self.find_nearest_tile(controller, bot0_x, bot0_y, "COUNTER")
             if counter:
                 if self.move_towards(controller, bot0_id, counter[0], counter[1]):
                     if controller.place(bot0_id, counter[0], counter[1]):
-                        print(f"Bot 0 placed pan on counter at turn {controller.get_turn()}")
+                        print(
+                            f"Bot 0 placed pan on counter at turn {controller.get_turn()}"
+                        )
                         self.sabotage_state = SabotageState.MOVE_TO_PLATE
                         return
-                        
+
         elif self.sabotage_state == SabotageState.MOVE_TO_PLATE:
             for mx in range(m.width):
                 for my in range(m.height):
@@ -1185,7 +1287,7 @@ class BotPlayer:
                             if controller.pickup(bot0_id, mx, my):
                                 self.sabotage_state = SabotageState.MOVE_TO_TRASH
                                 return
-                                
+
         elif self.sabotage_state == SabotageState.MOVE_TO_TRASH:
             trash = self.find_nearest_tile(controller, bot0_x, bot0_y, "TRASH")
             if trash:
@@ -1194,6 +1296,3 @@ class BotPlayer:
                         print(f"Bot 0 threw away plate at turn {controller.get_turn()}")
                         self.sabotage_state = SabotageState.MOVE_TO_PAN
                         return
-                    
-        
-        
